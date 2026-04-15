@@ -85,7 +85,7 @@ jobs:
             aws autoscaling enter-standby \
               --instance-ids $INSTANCE \
               --auto-scaling-group-name $ASG_NAME \
-              --should-decrement-desired-capacity false
+              --no-should-decrement-desired-capacity
 
             # ✅ Deploy via SSM
             echo "⚙️ Deploying application..."
@@ -119,4 +119,3 @@ jobs:
 
             echo "✅ $INSTANCE deployed successfully"
           done
-
