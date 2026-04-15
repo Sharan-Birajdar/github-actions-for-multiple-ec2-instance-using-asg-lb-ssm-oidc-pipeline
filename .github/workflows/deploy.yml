@@ -1,0 +1,89 @@
+name: Deploy to ASG via SSM (OIDC)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:   # ✅ manual trigger
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ASG_NAME: ${{ secrets.ASG_NAME }}
+  TARGET_GROUP_ARN: ${{ secrets.TARGET_GROUP_ARN }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 🔐 OIDC Authentication (NO AWS SECRETS NEEDED)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 🔍 Get EC2 Instances from ASG
+      - name: Get Instances in ASG
+        id: instances
+        run: |
+          IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:aws:autoscaling:groupName,Values=$ASG_NAME" \
+            --query "Reservations[*].Instances[*].InstanceId" \
+            --output text)
+
+          echo "ids=$IDS" >> $GITHUB_OUTPUT
+
+      # 🔁 Rolling Deployment
+      - name: Rolling Deploy using SSM
+        run: |
+          for INSTANCE in ${{ steps.instances.outputs.ids }}
+          do
+            echo "🚀 Deploying on $INSTANCE"
+
+            # 1️⃣ Remove from Load Balancer
+            aws elbv2 deregister-targets \
+              --target-group-arn $TARGET_GROUP_ARN \
+              --targets Id=$INSTANCE
+
+            aws elbv2 wait target-deregistered \
+              --target-group-arn $TARGET_GROUP_ARN \
+              --targets Id=$INSTANCE
+
+            # 2️⃣ Deploy using SSM
+            COMMAND_ID=$(aws ssm send-command \
+              --instance-ids $INSTANCE \
+              --document-name "AWS-RunShellScript" \
+              --comment "Deploy Application" \
+              --query "Command.CommandId" \
+              --parameters commands='[
+                "cd /var/www/html",
+                "sudo rm -rf *",
+                "sudo git clone https://github.com/YOUR_USERNAME/YOUR_REPO .",
+                "sudo systemctl restart nginx"
+              ]' \
+              --output text)
+
+            # Wait for command execution
+            aws ssm wait command-executed \
+              --command-id $COMMAND_ID \
+              --instance-id $INSTANCE
+
+            # 3️⃣ Add back to Load Balancer
+            aws elbv2 register-targets \
+              --target-group-arn $TARGET_GROUP_ARN \
+              --targets Id=$INSTANCE
+
+            aws elbv2 wait target-in-service \
+              --target-group-arn $TARGET_GROUP_ARN \
+              --targets Id=$INSTANCE
+
+            echo "✅ $INSTANCE deployed successfully"
+          done
