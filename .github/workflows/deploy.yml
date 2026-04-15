@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:   # ✅ manual trigger
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -23,41 +23,65 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 🔐 OIDC Authentication (NO AWS SECRETS NEEDED)
+      # 🔐 OIDC Authentication
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # 🔍 Get EC2 Instances from ASG
+      # 🔍 Get Running Instances from ASG
       - name: Get Instances in ASG
         id: instances
         run: |
           IDS=$(aws ec2 describe-instances \
             --filters "Name=tag:aws:autoscaling:groupName,Values=$ASG_NAME" \
+                      "Name=instance-state-name,Values=running" \
             --query "Reservations[*].Instances[*].InstanceId" \
             --output text | tr '\n' ' ')
 
+          echo "Instances: $IDS"
           echo "ids=$IDS" >> $GITHUB_OUTPUT
 
-      # 🔁 Rolling Deployment
-      - name: Rolling Deploy using SSM
+      # 🔁 Safe Rolling Deployment
+      - name: Rolling Deploy using SSM (Safe)
         run: |
           for INSTANCE in ${{ steps.instances.outputs.ids }}
           do
-            echo "🚀 Deploying on $INSTANCE"
+            echo "=============================="
+            echo "🚀 Processing $INSTANCE"
+            echo "=============================="
 
-            # 1️⃣ Remove from Load Balancer
-            aws elbv2 deregister-targets \
-              --target-group-arn $TARGET_GROUP_ARN \
-              --targets Id=$INSTANCE
+            # ✅ Check instance still exists
+            STATE=$(aws ec2 describe-instances \
+              --instance-ids $INSTANCE \
+              --query "Reservations[0].Instances[0].State.Name" \
+              --output text 2>/dev/null || echo "terminated")
 
-            aws elbv2 wait target-deregistered \
-              --target-group-arn $TARGET_GROUP_ARN \
-              --targets Id=$INSTANCE
+            if [ "$STATE" != "running" ]; then
+              echo "❌ Skipping $INSTANCE (state: $STATE)"
+              continue
+            fi
 
-            # 2️⃣ Deploy using SSM
+            # ✅ Check SSM availability
+            SSM_STATUS=$(aws ssm describe-instance-information \
+              --query "InstanceInformationList[?InstanceId=='$INSTANCE'].PingStatus" \
+              --output text)
+
+            if [ "$SSM_STATUS" != "Online" ]; then
+              echo "❌ Skipping $INSTANCE (SSM not ready)"
+              continue
+            fi
+
+            # ✅ Put instance in standby (prevents ASG termination)
+            echo "➡️ Putting instance into standby..."
+            aws autoscaling enter-standby \
+              --instance-ids $INSTANCE \
+              --auto-scaling-group-name $ASG_NAME \
+              --should-decrement-desired-capacity
+
+            # ✅ Deploy via SSM (FAST METHOD)
+            echo "⚙️ Deploying application..."
             COMMAND_ID=$(aws ssm send-command \
               --instance-ids $INSTANCE \
               --document-name "AWS-RunShellScript" \
@@ -65,25 +89,22 @@ jobs:
               --query "Command.CommandId" \
               --parameters commands='[
                 "cd /var/www/html",
-                "sudo rm -rf *",
-                "sudo git clone https://github.com/YOUR_USERNAME/YOUR_REPO .",
-                "sudo systemctl restart nginx"
+                "if [ -d \".git\" ]; then sudo git reset --hard && sudo git pull origin main; else sudo git clone https://github.com/YOUR_USERNAME/YOUR_REPO .; fi",
+                "sudo systemctl reload nginx"
               ]' \
               --output text)
 
-            # Wait for command execution
+            # ✅ Wait for deployment
             aws ssm wait command-executed \
               --command-id $COMMAND_ID \
               --instance-id $INSTANCE
 
-            # 3️⃣ Add back to Load Balancer
-            aws elbv2 register-targets \
-              --target-group-arn $TARGET_GROUP_ARN \
-              --targets Id=$INSTANCE
-
-            aws elbv2 wait target-in-service \
-              --target-group-arn $TARGET_GROUP_ARN \
-              --targets Id=$INSTANCE
+            # ✅ Bring instance back
+            echo "⬅️ Bringing instance back to service..."
+            aws autoscaling exit-standby \
+              --instance-ids $INSTANCE \
+              --auto-scaling-group-name $ASG_NAME
 
             echo "✅ $INSTANCE deployed successfully"
           done
+
