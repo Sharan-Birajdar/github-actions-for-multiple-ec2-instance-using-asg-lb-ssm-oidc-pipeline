@@ -86,12 +86,12 @@ jobs:
               --target-group-arn $TARGET_GROUP_ARN \
               --attributes Key=deregistration_delay.timeout_seconds,Value=30
 
-            # ✅ Put instance in standby
+            # ✅ Put instance in standby (decrement desired so no new instance launches)
             echo "➡️ Putting instance into standby..."
             aws autoscaling enter-standby \
               --instance-ids $INSTANCE \
               --auto-scaling-group-name $ASG_NAME \
-              --no-should-decrement-desired-capacity
+              --should-decrement-desired-capacity
 
             # ✅ Wait until instance is actually in Standby
             echo "⏳ Waiting for instance to reach Standby state..."
@@ -151,10 +151,24 @@ jobs:
               --instance-ids $INSTANCE \
               --auto-scaling-group-name $ASG_NAME
 
-            # ✅ Wait until instance is InService
-            echo "⏳ Waiting for instance to be healthy..."
-            aws autoscaling wait instance-in-service \
-              --instance-ids $INSTANCE
+            # ✅ Poll until instance is back InService
+            echo "⏳ Waiting for instance to be InService..."
+            for i in $(seq 1 20); do
+              IN_SERVICE_STATE=$(aws autoscaling describe-auto-scaling-instances \
+                --instance-ids $INSTANCE \
+                --query "AutoScalingInstances[0].LifecycleState" \
+                --output text)
+              echo "  Current state: $IN_SERVICE_STATE"
+              if [ "$IN_SERVICE_STATE" = "InService" ]; then
+                echo "✅ Instance is back InService"
+                break
+              fi
+              if [ $i -eq 20 ]; then
+                echo "❌ Timed out waiting for InService state"
+                exit 1
+              fi
+              sleep 10
+            done
 
             echo "✅ $INSTANCE deployed successfully"
           done
