@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: ap-south-1
   ASG_NAME: ${{ secrets.ASG_NAME }}
   TARGET_GROUP_ARN: ${{ secrets.TARGET_GROUP_ARN }}
 
