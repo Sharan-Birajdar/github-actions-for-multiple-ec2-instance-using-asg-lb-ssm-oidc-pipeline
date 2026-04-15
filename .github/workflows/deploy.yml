@@ -87,6 +87,25 @@ jobs:
               --auto-scaling-group-name $ASG_NAME \
               --no-should-decrement-desired-capacity
 
+            # ✅ Wait until instance is actually in Standby
+            echo "⏳ Waiting for instance to reach Standby state..."
+            for i in $(seq 1 20); do
+              STANDBY_STATE=$(aws autoscaling describe-auto-scaling-instances \
+                --instance-ids $INSTANCE \
+                --query "AutoScalingInstances[0].LifecycleState" \
+                --output text)
+              echo "  Current state: $STANDBY_STATE"
+              if [ "$STANDBY_STATE" = "Standby" ]; then
+                echo "✅ Instance is in Standby"
+                break
+              fi
+              if [ $i -eq 20 ]; then
+                echo "❌ Timed out waiting for Standby state"
+                exit 1
+              fi
+              sleep 10
+            done
+
             # ✅ Deploy via SSM
             echo "⚙️ Deploying application..."
             COMMAND_ID=$(aws ssm send-command \
