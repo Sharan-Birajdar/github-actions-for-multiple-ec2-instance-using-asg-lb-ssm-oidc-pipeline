@@ -61,7 +61,7 @@ jobs:
 
             # ✅ Check instance state
             STATE=$(aws ec2 describe-instances \
-              --instance-ids $INSTANCE \
+              --instance-ids "$INSTANCE" \
               --query "Reservations[0].Instances[0].State.Name" \
               --output text 2>/dev/null || echo "terminated")
 
@@ -80,95 +80,84 @@ jobs:
               continue
             fi
 
-            # ✅ Reduce deregistration delay to speed up standby
-            echo "⚡ Reducing deregistration delay to 30s..."
+            # ⚡ Reduce deregistration delay
             aws elbv2 modify-target-group-attributes \
-              --target-group-arn $TARGET_GROUP_ARN \
+              --target-group-arn "$TARGET_GROUP_ARN" \
               --attributes Key=deregistration_delay.timeout_seconds,Value=30
 
-            # ✅ Put instance in standby (decrement desired so no new instance launches)
+            # ✅ Standby (FIXED)
             echo "➡️ Putting instance into standby..."
-            aws autoscaling enter-standby \
-              --instance-ids $INSTANCE \
-              --auto-scaling-group-name $ASG_NAME \
-              --should-decrement-desired-capacity
+            aws autoscaling enter-standby --instance-ids "$INSTANCE" --auto-scaling-group-name "$ASG_NAME" --should-decrement-desired-capacity false
 
-            # ✅ Wait until instance is actually in Standby
-            echo "⏳ Waiting for instance to reach Standby state..."
+            # ⏳ Wait for Standby
+            echo "⏳ Waiting for Standby..."
             for i in $(seq 1 20); do
-              STANDBY_STATE=$(aws autoscaling describe-auto-scaling-instances \
-                --instance-ids $INSTANCE \
+              STATE=$(aws autoscaling describe-auto-scaling-instances \
+                --instance-ids "$INSTANCE" \
                 --query "AutoScalingInstances[0].LifecycleState" \
                 --output text)
-              echo "  Current state: $STANDBY_STATE"
-              if [ "$STANDBY_STATE" = "Standby" ]; then
-                echo "✅ Instance is in Standby"
-                break
-              fi
-              if [ $i -eq 20 ]; then
-                echo "❌ Timed out waiting for Standby state"
-                exit 1
-              fi
+              echo "State: $STATE"
+              [ "$STATE" = "Standby" ] && break
               sleep 10
             done
 
-            # ✅ Deploy via SSM
+            # 🚀 DEPLOY (FIXED PART)
             echo "⚙️ Deploying application..."
             COMMAND_ID=$(aws ssm send-command \
-              --instance-ids $INSTANCE \
+              --instance-ids "$INSTANCE" \
               --document-name "AWS-RunShellScript" \
-              --comment "Deploy Application" \
               --query "Command.CommandId" \
               --parameters commands='[
+                "echo ===== START DEPLOY =====",
+                "whoami",
+                "hostname",
+                "sudo mkdir -p /var/www/html",
+                "sudo chown -R ubuntu:ubuntu /var/www/html",
                 "cd /var/www/html",
-                "if [ -d \".git\" ]; then sudo git reset --hard && sudo git pull origin main; else sudo git clone https://github.com/YOUR_USERNAME/YOUR_REPO .; fi",
-                "sudo systemctl reload nginx"
+                "echo BEFORE:",
+                "ls -la",
+                "if [ -d \".git\" ]; then git reset --hard && git pull origin main; else git clone https://github.com/YOUR_USERNAME/YOUR_REPO .; fi",
+                "echo AFTER:",
+                "ls -la",
+                "sudo systemctl restart nginx",
+                "echo ===== END DEPLOY ====="
               ]' \
               --output text)
 
-            echo "🕒 Waiting for deployment..."
             aws ssm wait command-executed \
-              --command-id $COMMAND_ID \
-              --instance-id $INSTANCE
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE"
 
-            # ✅ Fetch and show command output
-            echo "📋 Deployment output:"
+            # 📋 Show logs
             aws ssm get-command-invocation \
-              --command-id $COMMAND_ID \
-              --instance-id $INSTANCE \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$INSTANCE" \
               --query "{Status: Status, Output: StandardOutputContent, Error: StandardErrorContent}" \
               --output text
 
-            # ✅ Restore deregistration delay back to 300s
-            echo "🔁 Restoring deregistration delay to 300s..."
+            # 🔁 Restore delay
             aws elbv2 modify-target-group-attributes \
-              --target-group-arn $TARGET_GROUP_ARN \
+              --target-group-arn "$TARGET_GROUP_ARN" \
               --attributes Key=deregistration_delay.timeout_seconds,Value=300
 
-            # ✅ Bring instance back
-            echo "⬅️ Bringing instance back to service..."
+            # ⬅️ Exit standby
+            echo "⬅️ Bringing instance back..."
             aws autoscaling exit-standby \
-              --instance-ids $INSTANCE \
-              --auto-scaling-group-name $ASG_NAME
+              --instance-ids "$INSTANCE" \
+              --auto-scaling-group-name "$ASG_NAME"
 
-            # ✅ Poll until instance is back InService
-            echo "⏳ Waiting for instance to be InService..."
+            # ⏳ Wait InService
+            echo "⏳ Waiting for InService..."
             for i in $(seq 1 20); do
-              IN_SERVICE_STATE=$(aws autoscaling describe-auto-scaling-instances \
-                --instance-ids $INSTANCE \
+              STATE=$(aws autoscaling describe-auto-scaling-instances \
+                --instance-ids "$INSTANCE" \
                 --query "AutoScalingInstances[0].LifecycleState" \
                 --output text)
-              echo "  Current state: $IN_SERVICE_STATE"
-              if [ "$IN_SERVICE_STATE" = "InService" ]; then
-                echo "✅ Instance is back InService"
-                break
-              fi
-              if [ $i -eq 20 ]; then
-                echo "❌ Timed out waiting for InService state"
-                exit 1
-              fi
+              echo "State: $STATE"
+              [ "$STATE" = "InService" ] && break
               sleep 10
             done
 
             echo "✅ $INSTANCE deployed successfully"
           done
+
