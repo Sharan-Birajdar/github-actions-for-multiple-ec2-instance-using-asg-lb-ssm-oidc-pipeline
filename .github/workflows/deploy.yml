@@ -77,8 +77,7 @@ jobs:
             echo "➡️ Putting instance into standby..."
             aws autoscaling enter-standby \
               --instance-ids $INSTANCE \
-              --auto-scaling-group-name $ASG_NAME \
-              --should-decrement-desired-capacity
+              --auto-scaling-group-name $ASG_NAME 
 
             # ✅ Deploy via SSM (FAST METHOD)
             echo "⚙️ Deploying application..."
