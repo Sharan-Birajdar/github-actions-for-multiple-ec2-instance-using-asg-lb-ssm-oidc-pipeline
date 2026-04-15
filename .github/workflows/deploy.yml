@@ -40,19 +40,26 @@ jobs:
             --query "Reservations[*].Instances[*].InstanceId" \
             --output text | tr '\n' ' ')
 
+          if [ -z "$IDS" ]; then
+            echo "❌ No running instances found!"
+            exit 1
+          fi
+
           echo "Instances: $IDS"
           echo "ids=$IDS" >> $GITHUB_OUTPUT
 
       # 🔁 Safe Rolling Deployment
       - name: Rolling Deploy using SSM (Safe)
         run: |
+          set -e
+
           for INSTANCE in ${{ steps.instances.outputs.ids }}
           do
-            echo "=============================="
+            echo "======================================"
             echo "🚀 Processing $INSTANCE"
-            echo "=============================="
+            echo "======================================"
 
-            # ✅ Check instance still exists
+            # ✅ Check instance state
             STATE=$(aws ec2 describe-instances \
               --instance-ids $INSTANCE \
               --query "Reservations[0].Instances[0].State.Name" \
@@ -73,14 +80,14 @@ jobs:
               continue
             fi
 
-            # ✅ Put instance in standby (prevents ASG termination)
+            # ✅ Put instance in standby
             echo "➡️ Putting instance into standby..."
             aws autoscaling enter-standby \
               --instance-ids $INSTANCE \
               --auto-scaling-group-name $ASG_NAME \
               --should-decrement-desired-capacity false
 
-            # ✅ Deploy via SSM (FAST METHOD)
+            # ✅ Deploy via SSM
             echo "⚙️ Deploying application..."
             COMMAND_ID=$(aws ssm send-command \
               --instance-ids $INSTANCE \
@@ -94,7 +101,7 @@ jobs:
               ]' \
               --output text)
 
-            # ✅ Wait for deployment
+            echo "🕒 Waiting for deployment..."
             aws ssm wait command-executed \
               --command-id $COMMAND_ID \
               --instance-id $INSTANCE
@@ -104,6 +111,11 @@ jobs:
             aws autoscaling exit-standby \
               --instance-ids $INSTANCE \
               --auto-scaling-group-name $ASG_NAME
+
+            # ✅ Wait until instance is InService
+            echo "⏳ Waiting for instance to be healthy..."
+            aws autoscaling wait instance-in-service \
+              --instance-ids $INSTANCE
 
             echo "✅ $INSTANCE deployed successfully"
           done
