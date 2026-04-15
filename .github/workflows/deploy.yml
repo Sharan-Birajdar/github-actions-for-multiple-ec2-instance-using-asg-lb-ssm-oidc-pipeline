@@ -37,7 +37,7 @@ jobs:
           IDS=$(aws ec2 describe-instances \
             --filters "Name=tag:aws:autoscaling:groupName,Values=$ASG_NAME" \
             --query "Reservations[*].Instances[*].InstanceId" \
-            --output text)
+            --output text | tr '\n' ' ')
 
           echo "ids=$IDS" >> $GITHUB_OUTPUT
 
